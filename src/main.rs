@@ -37,14 +37,26 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+const DEFAULT_MUUUXY_SERVER_SCHEME: &str = "http";
 const DEFAULT_MUUUXY_SERVER_HOST: &str = "localhost";
 const DEFAULT_MUUUXY_SERVER_PORT: &str = "3000";
+const DEFAULT_MUUUXY_SERVER_DOMAIN: &str = "localhost:3000";
 
-pub struct State {}
+pub struct State {
+    scheme: String,
+    host: String,
+    port: String,
+    domain: String,
+}
 
 impl State {
-    fn new() -> Self {
-        Self {}
+    pub fn new(scheme: String, host: String, port: String, domain: String) -> Self {
+        Self {
+            scheme,
+            host,
+            port,
+            domain,
+        }
     }
 }
 
@@ -63,7 +75,7 @@ struct ProxyParams {
     key: String,
 }
 
-async fn proxy(params: Query<ProxyParams>) -> impl IntoResponse {
+async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl IntoResponse {
     let params: ProxyParams = params.0;
 
     let response_builder = Response::builder();
@@ -224,8 +236,8 @@ async fn proxy(params: Query<ProxyParams>) -> impl IntoResponse {
                             .to_string();
 
                     item.uri = format!(
-                        "http://localhost:3000/proxy?key={}&url={}",
-                        key, encoded_url
+                        "{}://{}/proxy?key={}&url={}",
+                        state.scheme, state.domain, key, encoded_url
                     );
 
                     item
@@ -270,8 +282,8 @@ async fn proxy(params: Query<ProxyParams>) -> impl IntoResponse {
                             .to_string();
 
                     item.uri = format!(
-                        "http://localhost:3000/proxy?key={}&url={}",
-                        key, encoded_url
+                        "{}://{}/proxy?key={}&url={}",
+                        state.scheme, state.domain, key, encoded_url
                     );
 
                     item
@@ -315,6 +327,18 @@ async fn main() -> Result<(), Error> {
 
     info!("muuuxy server starting");
 
+    let server_scheme = match env::var("MUUUXY_SERVER_SCHEME") {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(
+                value = DEFAULT_MUUUXY_SERVER_SCHEME,
+                "MUUUXY_SERVER_SCHEME not set, using default",
+            );
+
+            DEFAULT_MUUUXY_SERVER_SCHEME.to_string()
+        }
+    };
+
     let server_host = match env::var("MUUUXY_SERVER_HOST") {
         Ok(addr) => addr,
         Err(_) => {
@@ -339,9 +363,26 @@ async fn main() -> Result<(), Error> {
         }
     };
 
+    let server_domain = match env::var("MUUUXY_SERVER_DOMAIN") {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(
+                value = DEFAULT_MUUUXY_SERVER_DOMAIN,
+                "MUUUXY_SERVER_DOMAIN not set, using default",
+            );
+
+            DEFAULT_MUUUXY_SERVER_DOMAIN.to_string()
+        }
+    };
+
     let server_address = format!("{}:{}", server_host, server_port);
 
-    let state = Arc::new(State::new());
+    let state = Arc::new(State::new(
+        server_scheme,
+        server_host,
+        server_port,
+        server_domain,
+    ));
 
     let service = ServiceBuilder::new()
         .layer(TraceLayer::new_for_http())
