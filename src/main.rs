@@ -1,0 +1,368 @@
+use std::{
+    env,
+    io::Error,
+    net::IpAddr,
+    str::FromStr,
+    sync::Arc,
+    time::{self, Duration},
+};
+
+use tokio::net::{self, TcpListener};
+
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
+use serde::Deserialize;
+
+use tracing::{debug, info, level_filters::LevelFilter, warn};
+use tracing_subscriber::EnvFilter;
+
+use http::{Method, StatusCode, header, redirect::Policy};
+
+use axum::{
+    Router,
+    body::Body,
+    extract::{Extension, Query},
+    http::{HeaderName, HeaderValue, Uri, uri::Scheme},
+    response::{IntoResponse, Response},
+    routing::get,
+    serve,
+};
+
+use tower::ServiceBuilder;
+use tower_http::{
+    self,
+    compression::CompressionLayer,
+    cors::{Any, CorsLayer},
+    propagate_header::PropagateHeaderLayer,
+    trace::TraceLayer,
+};
+
+const DEFAULT_MUUUXY_SERVER_HOST: &str = "localhost";
+const DEFAULT_MUUUXY_SERVER_PORT: &str = "3000";
+
+pub struct State {}
+
+impl State {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+async fn healthz() -> impl IntoResponse {
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .unwrap();
+
+    return response;
+}
+
+#[derive(Deserialize)]
+struct ProxyParams {
+    url: String,
+    key: String,
+}
+
+async fn proxy(params: Query<ProxyParams>) -> impl IntoResponse {
+    let params: ProxyParams = params.0;
+
+    let response_builder = Response::builder();
+
+    let url = params.url;
+    if url.is_empty() {
+        return response_builder
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from("path cannot be empty"))
+            .unwrap();
+    }
+
+    let key = params.key;
+    if key.is_empty() {
+        return response_builder
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from("key cannot be empty"))
+            .unwrap();
+    }
+
+    info!(path = url, key = key, "proxy route called");
+
+    let uri = Uri::from_str(&url).unwrap();
+
+    let host = uri.host().unwrap();
+    debug!(host = host, "path host");
+
+    let scheme = uri.scheme();
+    let port: u16 = match scheme {
+        Some(s) if *s == Scheme::HTTP => 80,
+        Some(s) if *s == Scheme::HTTPS => 443,
+        Some(_) => {
+            return response_builder
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap();
+        }
+        None => {
+            return response_builder
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap();
+        }
+    };
+
+    let addrs = net::lookup_host(format!("{}:{}", host, port))
+        .await
+        .unwrap();
+    for addr in addrs {
+        let ip = addr.ip();
+
+        match ip {
+            IpAddr::V4(v4) => {
+                debug!(ip = v4.to_string(), "IP address resolved");
+
+                // NOTE: Trys to avoid Server-Side Request Forgery (SSRF).
+                if v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+                {
+                    return response_builder
+                        .status(StatusCode::BAD_REQUEST)
+                        .header(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/octet-stream"),
+                        )
+                        .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                        .body(Body::empty())
+                        .unwrap();
+                }
+            }
+            IpAddr::V6(_) => {
+                todo!();
+            }
+        };
+    }
+
+    // TODO: Check if the file ends with `.m3u8`.
+    // TODO: Find better timeout value.
+    let client = http::ClientBuilder::new()
+        // NOTE: Trys to avoid slowloris / connection flooding.
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(time::Duration::from_secs(5))
+        // NOTE: Trys to avoid bait-and-switch.
+        .redirect(Policy::none())
+        .referer(false)
+        .https_only(false)
+        .user_agent("muuuxy/1.0")
+        .build()
+        .unwrap();
+
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => {
+            return response_builder
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(
+                    "failed to perform request on the proxied server",
+                ))
+                .unwrap();
+        }
+    };
+
+    if response.status() != StatusCode::OK {
+        return response_builder
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(
+                "request to proxied server returned a non 200 status",
+            ))
+            .unwrap();
+    }
+
+    let body = response.bytes().await.unwrap();
+
+    let playlist = match m3u8::parse_playlist(&body) {
+        Ok((_, playlist)) => playlist,
+        _ => {
+            // NOTE: When the data isn't a playlist, we are considering it a binary chunk. We have
+            // to check if it is right.
+            let len = body.len();
+            let len_as_string = len.to_string();
+
+            return response_builder
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                )
+                .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                .header(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len_as_string).unwrap(),
+                )
+                .body(Body::from(body))
+                .unwrap();
+        }
+    };
+
+    match playlist {
+        m3u8::Playlist::MasterPlaylist(mut master) => {
+            info!("master playlist got");
+
+            master.variants = master
+                .variants
+                .into_iter()
+                .map(|mut item| {
+                    let mut path = url.clone();
+                    if let Some(pos) = path.rfind('/') {
+                        path.replace_range(pos.., "");
+                    }
+
+                    let url = item.uri;
+                    let encoded_url =
+                        utf8_percent_encode(&format!("{}/{}", path, url), NON_ALPHANUMERIC)
+                            .to_string();
+
+                    item.uri = format!(
+                        "http://localhost:3000/proxy?key={}&url={}",
+                        key, encoded_url
+                    );
+
+                    item
+                })
+                .collect();
+
+            let mut master_buffer: Vec<u8> = Vec::new();
+            master.write_to(&mut master_buffer).unwrap();
+
+            let len = master_buffer.len();
+            let len_as_string = len.to_string();
+
+            return response_builder
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                )
+                .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                .header(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len_as_string).unwrap(),
+                )
+                .body(Body::from(master_buffer))
+                .unwrap();
+        }
+        m3u8::Playlist::MediaPlaylist(mut media) => {
+            info!("media playlist got");
+
+            media.segments = media
+                .segments
+                .into_iter()
+                .map(|mut item| {
+                    let mut path = url.clone();
+                    if let Some(pos) = path.rfind('/') {
+                        path.replace_range(pos.., "");
+                    }
+
+                    let url = item.uri;
+                    let encoded_url =
+                        utf8_percent_encode(&format!("{}/{}", path, url), NON_ALPHANUMERIC)
+                            .to_string();
+
+                    item.uri = format!(
+                        "http://localhost:3000/proxy?key={}&url={}",
+                        key, encoded_url
+                    );
+
+                    item
+                })
+                .collect();
+
+            let mut media_buffer: Vec<u8> = Vec::new();
+            media.write_to(&mut media_buffer).unwrap();
+
+            let len = media_buffer.len();
+            let len_as_string = len.to_string();
+
+            return response_builder
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                )
+                .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                .header(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len_as_string).unwrap(),
+                )
+                .body(Body::from(media_buffer))
+                .unwrap();
+        }
+    };
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_env_var("LOG")
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env()
+                .unwrap(),
+        )
+        .init();
+
+    info!("muuuxy server starting");
+
+    let server_host = match env::var("MUUUXY_SERVER_HOST") {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(
+                value = DEFAULT_MUUUXY_SERVER_HOST,
+                "MUUUXY_SERVER_HOST not set, using default",
+            );
+
+            DEFAULT_MUUUXY_SERVER_HOST.to_string()
+        }
+    };
+
+    let server_port = match env::var("MUUUXY_SERVER_PORT") {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(
+                value = DEFAULT_MUUUXY_SERVER_PORT,
+                "MUUUXY_SERVER_PORT not set, using default",
+            );
+
+            DEFAULT_MUUUXY_SERVER_PORT.to_string()
+        }
+    };
+
+    let server_address = format!("{}:{}", server_host, server_port);
+
+    let state = Arc::new(State::new());
+
+    let service = ServiceBuilder::new()
+        .layer(TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET])
+                .allow_headers(Any),
+        )
+        .layer(CompressionLayer::new())
+        .layer(PropagateHeaderLayer::new(HeaderName::from_static(
+            "x-request-id",
+        )));
+
+    let router = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/proxy", get(proxy))
+        .layer(Extension(state))
+        .layer(service);
+
+    info!("muuuxy server started");
+
+    return serve(TcpListener::bind(server_address).await?, router).await;
+}
