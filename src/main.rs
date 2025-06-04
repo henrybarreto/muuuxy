@@ -1,11 +1,4 @@
-use std::{
-    env,
-    io::Error,
-    net::IpAddr,
-    str::FromStr,
-    sync::Arc,
-    time::{self, Duration},
-};
+use std::{env, io::Error, net::IpAddr, str::FromStr, sync::Arc, time::Duration};
 
 use tokio::net::{self, TcpListener};
 
@@ -27,6 +20,7 @@ use axum::{
     routing::get,
     serve,
 };
+use axum_extra::{TypedHeader, headers::Host};
 
 use tower::ServiceBuilder;
 use tower_http::{
@@ -38,9 +32,9 @@ use tower_http::{
 };
 
 const DEFAULT_MUUUXY_SERVER_SCHEME: &str = "http";
-const DEFAULT_MUUUXY_SERVER_HOST: &str = "localhost";
+const DEFAULT_MUUUXY_SERVER_HOST: &str = "0.0.0.0";
 const DEFAULT_MUUUXY_SERVER_PORT: &str = "3000";
-const DEFAULT_MUUUXY_SERVER_DOMAIN: &str = "localhost:3000";
+const DEFAULT_MUUUXY_SERVER_DOMAIN: &str = "localhost";
 
 pub struct State {
     scheme: String,
@@ -75,8 +69,14 @@ struct ProxyParams {
     key: String,
 }
 
-async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl IntoResponse {
+async fn proxy(
+    params: Query<ProxyParams>,
+    host: TypedHeader<Host>,
+    state: Extension<Arc<State>>,
+) -> impl IntoResponse {
     let params: ProxyParams = params.0;
+
+    let host_port = host.port().unwrap();
 
     let response_builder = Response::builder();
 
@@ -159,17 +159,22 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
         };
     }
 
+    const HTTP_BODY_MAX_LENGTH: usize = 10 * 1_000_000;
+    const HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
+    const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+    const HTTP_USER_AGENT: &str = "muuuxy/1.0";
+
     // TODO: Check if the file ends with `.m3u8`.
     // TODO: Find better timeout value.
     let client = http::ClientBuilder::new()
         // NOTE: Trys to avoid slowloris / connection flooding.
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(time::Duration::from_secs(5))
+        .connect_timeout(HTTP_CONNECTION_TIMEOUT)
+        .timeout(HTTP_TIMEOUT)
         // NOTE: Trys to avoid bait-and-switch.
         .redirect(Policy::none())
         .referer(false)
         .https_only(true)
-        .user_agent("muuuxy/1.0")
+        .user_agent(HTTP_USER_AGENT)
         .build()
         .unwrap();
 
@@ -201,6 +206,20 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
     }
 
     let body = response.bytes().await.unwrap();
+    if body.len() > HTTP_BODY_MAX_LENGTH {
+        info!(
+            length = body.len(),
+            max = HTTP_BODY_MAX_LENGTH,
+            "content length of proxied request is great than max allowed"
+        );
+
+        return response_builder
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(
+                "content length of proxied request is great than 1MB",
+            ))
+            .unwrap();
+    }
 
     let playlist = match m3u8::parse_playlist(&body) {
         Ok((_, playlist)) => playlist,
@@ -257,8 +276,8 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
                         utf8_percent_encode(&format!("{}", uri), NON_ALPHANUMERIC).to_string();
 
                     item.uri = format!(
-                        "{}://{}/proxy?key={}&url={}",
-                        state.scheme, state.domain, key, encoded_uri
+                        "{}://{}:{}/proxy?key={}&url={}",
+                        state.scheme, state.domain, host_port, key, encoded_uri
                     );
 
                     item
@@ -275,9 +294,8 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
                 .status(StatusCode::OK)
                 .header(
                     header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/octet-stream"),
+                    HeaderValue::from_static("audio/mpegurl"),
                 )
-                .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
                 .header(
                     header::CONTENT_LENGTH,
                     HeaderValue::from_str(&len_as_string).unwrap(),
@@ -315,8 +333,8 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
                         utf8_percent_encode(&format!("{}", uri), NON_ALPHANUMERIC).to_string();
 
                     item.uri = format!(
-                        "{}://{}/proxy?key={}&url={}",
-                        state.scheme, state.domain, key, encoded_uri
+                        "{}://{}:{}/proxy?key={}&url={}",
+                        state.scheme, state.domain, host_port, key, encoded_uri
                     );
 
                     item
@@ -333,9 +351,8 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
                 .status(StatusCode::OK)
                 .header(
                     header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/octet-stream"),
+                    HeaderValue::from_static("audio/mpegurl"),
                 )
-                .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
                 .header(
                     header::CONTENT_LENGTH,
                     HeaderValue::from_str(&len_as_string).unwrap(),

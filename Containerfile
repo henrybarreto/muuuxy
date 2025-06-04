@@ -10,12 +10,12 @@ FROM docker.io/debian:bookworm
 
 RUN apt update
 
-RUN apt install -y curl
+RUN apt install -y curl ca-certificates
 
 ENV MUUUXY_SERVER_HOST="0.0.0.0"
 ENV MUUUXY_SERVER_PORT=3000
 ENV MUUUXY_SERVER_SCHEME="http"
-ENV MUUUXY_SERVER_DOMAIN="localhost:3000"
+ENV MUUUXY_SERVER_DOMAIN="localhost"
 
 EXPOSE 3000
 
