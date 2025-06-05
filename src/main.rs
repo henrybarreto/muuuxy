@@ -34,7 +34,7 @@ use tower_http::{
 const DEFAULT_MUUUXY_SERVER_SCHEME: &str = "http";
 const DEFAULT_MUUUXY_SERVER_HOST: &str = "0.0.0.0";
 const DEFAULT_MUUUXY_SERVER_PORT: &str = "3000";
-const DEFAULT_MUUUXY_SERVER_DOMAIN: &str = "localhost";
+const DEFAULT_MUUUXY_SERVER_DOMAIN: &str = "localhost:3000";
 
 pub struct State {
     scheme: String,
@@ -83,8 +83,6 @@ async fn proxy(
     state: Extension<Arc<State>>,
 ) -> impl IntoResponse {
     let params: ProxyParams = params.0;
-
-    let host_port = host.port().unwrap();
 
     let response_builder = Response::builder();
 
@@ -292,8 +290,8 @@ async fn proxy(
                         utf8_percent_encode(&format!("{}", uri), NON_ALPHANUMERIC).to_string();
 
                     item.uri = format!(
-                        "{}://{}:{}/proxy?key={}&url={}",
-                        state.scheme, state.domain, host_port, key, encoded_uri
+                        "{}://{}/proxy?key={}&url={}",
+                        state.scheme, state.domain, key, encoded_uri
                     );
 
                     item
@@ -349,8 +347,8 @@ async fn proxy(
                         utf8_percent_encode(&format!("{}", uri), NON_ALPHANUMERIC).to_string();
 
                     item.uri = format!(
-                        "{}://{}:{}/proxy?key={}&url={}",
-                        state.scheme, state.domain, host_port, key, encoded_uri
+                        "{}://{}/proxy?key={}&url={}",
+                        state.scheme, state.domain, key, encoded_uri
                     );
 
                     item
