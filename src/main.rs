@@ -22,7 +22,7 @@ use axum::{
 };
 use axum_extra::{TypedHeader, headers::Host};
 
-use tower::{ServiceBuilder, util::Optional};
+use tower::ServiceBuilder;
 use tower_http::{
     self,
     compression::CompressionLayer,
@@ -194,12 +194,12 @@ async fn proxy(
 
     let response = match client.get(&url_to_proxy).send().await {
         Ok(r) => r,
-        Err(_) => {
+        Err(e) => {
+            error!("failed to perform request on the proxied url: {}", e);
+
             return response_builder
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(
-                    "failed to perform request on the proxied server",
-                ))
+                .body(Body::from("failed to perform request on the proxied url"))
                 .unwrap();
         }
     };
