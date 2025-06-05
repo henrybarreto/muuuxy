@@ -6,10 +6,10 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 use serde::Deserialize;
 
-use tracing::{debug, error, info, level_filters::LevelFilter, warn};
+use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
 use tracing_subscriber::EnvFilter;
 
-use http::{Method, StatusCode, Url, header, redirect::Policy};
+use http::{Method, Proxy, StatusCode, Url, header, redirect::Policy};
 
 use axum::{
     Router,
@@ -22,7 +22,7 @@ use axum::{
 };
 use axum_extra::{TypedHeader, headers::Host};
 
-use tower::ServiceBuilder;
+use tower::{ServiceBuilder, util::Optional};
 use tower_http::{
     self,
     compression::CompressionLayer,
@@ -41,15 +41,23 @@ pub struct State {
     host: String,
     port: String,
     domain: String,
+    proxy: Option<String>,
 }
 
 impl State {
-    pub fn new(scheme: String, host: String, port: String, domain: String) -> Self {
+    pub fn new(
+        scheme: String,
+        host: String,
+        port: String,
+        domain: String,
+        proxy: Option<String>,
+    ) -> Self {
         Self {
             scheme,
             host,
             port,
             domain,
+            proxy,
         }
     }
 }
@@ -166,7 +174,7 @@ async fn proxy(
 
     // TODO: Check if the file ends with `.m3u8`.
     // TODO: Find better timeout value.
-    let client = http::ClientBuilder::new()
+    let mut builder = http::ClientBuilder::new()
         // NOTE: Trys to avoid slowloris / connection flooding.
         .connect_timeout(HTTP_CONNECTION_TIMEOUT)
         .timeout(HTTP_TIMEOUT)
@@ -174,9 +182,17 @@ async fn proxy(
         .redirect(Policy::none())
         .referer(false)
         .https_only(true)
-        .user_agent(HTTP_USER_AGENT)
-        .build()
-        .unwrap();
+        .user_agent(HTTP_USER_AGENT);
+
+    builder = if let Some(proxy) = &state.proxy {
+        debug!(proxy = proxy, "using proxy on proxied url");
+
+        builder.proxy(Proxy::all(proxy).unwrap())
+    } else {
+        builder
+    };
+
+    let client = builder.build().unwrap();
 
     let response = match client.get(&url_to_proxy).send().await {
         Ok(r) => r,
@@ -247,7 +263,7 @@ async fn proxy(
 
     match playlist {
         m3u8::Playlist::MasterPlaylist(mut master) => {
-            info!("master playlist got");
+            trace!("master playlist got");
 
             master.variants = master
                 .variants
@@ -304,7 +320,7 @@ async fn proxy(
                 .unwrap();
         }
         m3u8::Playlist::MediaPlaylist(mut media) => {
-            info!("media playlist got");
+            trace!("media playlist got");
 
             media.segments = media
                 .segments
@@ -425,6 +441,19 @@ async fn main() -> Result<(), Error> {
         }
     };
 
+    let server_proxy = match env::var("MUUUXY_SERVER_PROXY") {
+        Ok(addr) => {
+            info!(proxy = addr, "using proxy on proxied requests");
+
+            Some(addr)
+        }
+        Err(_) => {
+            warn!("MUUUXY_SERVER_PROXY not set, using default",);
+
+            None
+        }
+    };
+
     let server_address = format!("{}:{}", server_host, server_port);
 
     let state = Arc::new(State::new(
@@ -432,6 +461,7 @@ async fn main() -> Result<(), Error> {
         server_host,
         server_port,
         server_domain,
+        server_proxy,
     ));
 
     let service = ServiceBuilder::new()
