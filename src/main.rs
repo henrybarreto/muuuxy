@@ -180,9 +180,9 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
         };
     }
 
-    const HTTP_BODY_MAX_LENGTH: usize = 10 * 1_000_000;
-    const HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
-    const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+    const HTTP_BODY_MAX_LENGTH: usize = 50 * 1_000_000;
+    const HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+    const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
     const HTTP_USER_AGENT: &str = "muuuxy/1.0";
 
     // TODO: Check if the file ends with `.m3u8`.
@@ -245,7 +245,7 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
         return response_builder
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(Body::from(
-                "content length of proxied request is great than 1MB",
+                "content length of proxied request is great than max allowed",
             ))
             .unwrap();
     }
