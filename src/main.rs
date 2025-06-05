@@ -20,7 +20,6 @@ use axum::{
     routing::get,
     serve,
 };
-use axum_extra::{TypedHeader, headers::Host};
 
 use tower::ServiceBuilder;
 use tower_http::{
@@ -30,6 +29,16 @@ use tower_http::{
     propagate_header::PropagateHeaderLayer,
     trace::TraceLayer,
 };
+
+use rand::{Rng, distr::Alphanumeric, rng};
+
+fn generate_key(len: usize) -> String {
+    rng()
+        .sample_iter(&Alphanumeric)
+        .take(len)
+        .map(char::from)
+        .collect::<String>()
+}
 
 const DEFAULT_MUUUXY_SERVER_SCHEME: &str = "http";
 const DEFAULT_MUUUXY_SERVER_HOST: &str = "0.0.0.0";
@@ -42,6 +51,7 @@ pub struct State {
     port: String,
     domain: String,
     proxy: Option<String>,
+    key: String,
 }
 
 impl State {
@@ -51,6 +61,7 @@ impl State {
         port: String,
         domain: String,
         proxy: Option<String>,
+        key: String,
     ) -> Self {
         Self {
             scheme,
@@ -58,6 +69,7 @@ impl State {
             port,
             domain,
             proxy,
+            key,
         }
     }
 }
@@ -77,14 +89,17 @@ struct ProxyParams {
     key: String,
 }
 
-async fn proxy(
-    params: Query<ProxyParams>,
-    host: TypedHeader<Host>,
-    state: Extension<Arc<State>>,
-) -> impl IntoResponse {
+async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl IntoResponse {
     let params: ProxyParams = params.0;
 
     let response_builder = Response::builder();
+
+    if params.key != state.key {
+        return response_builder
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from("key is invalid"))
+            .unwrap();
+    }
 
     let url_to_proxy = params.url;
     if url_to_proxy.is_empty() {
@@ -452,6 +467,21 @@ async fn main() -> Result<(), Error> {
         }
     };
 
+    const GENERATE_KEY_LENGTH: usize = 32;
+
+    let server_key = match env::var("MUUUXY_SERVER_KEY") {
+        Ok(key) => key,
+        Err(_) => {
+            let key = generate_key(GENERATE_KEY_LENGTH);
+
+            warn!(key = key, "MUUUXY_SERVER_KEY not set, using generated");
+
+            key
+        }
+    };
+
+    info!(key = server_key, "server key defined");
+
     let server_address = format!("{}:{}", server_host, server_port);
 
     let state = Arc::new(State::new(
@@ -460,6 +490,7 @@ async fn main() -> Result<(), Error> {
         server_port,
         server_domain,
         server_proxy,
+        server_key,
     ));
 
     let service = ServiceBuilder::new()
