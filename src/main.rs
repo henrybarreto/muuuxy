@@ -234,6 +234,8 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
             .unwrap();
     }
 
+    let headers = response.headers().clone();
+
     let body = response.bytes().await.unwrap();
     if body.len() > HTTP_BODY_MAX_LENGTH {
         info!(
@@ -319,12 +321,22 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
             let len = master_buffer.len();
             let len_as_string = len.to_string();
 
+            let content_type = if let Some(conent_type) = headers.get("content-type") {
+                conent_type
+            } else {
+                error!("proxied url doesn't have the required content-type header");
+
+                return response_builder
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(
+                        "proxied url doesn't have the required content-type header",
+                    ))
+                    .unwrap();
+            };
+
             return response_builder
                 .status(StatusCode::OK)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("audio/mpegurl"),
-                )
+                .header(header::CONTENT_TYPE, content_type)
                 .header(
                     header::CONTENT_LENGTH,
                     HeaderValue::from_str(&len_as_string).unwrap(),
@@ -376,12 +388,22 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
             let len = media_buffer.len();
             let len_as_string = len.to_string();
 
+            let content_type = if let Some(content_type) = headers.get("content-type") {
+                content_type
+            } else {
+                error!("proxied url doesn't have the required content-type header");
+
+                return response_builder
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(
+                        "proxied url doesn't have the required content-type header",
+                    ))
+                    .unwrap();
+            };
+
             return response_builder
                 .status(StatusCode::OK)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("audio/mpegurl"),
-                )
+                .header(header::CONTENT_TYPE, content_type)
                 .header(
                     header::CONTENT_LENGTH,
                     HeaderValue::from_str(&len_as_string).unwrap(),
