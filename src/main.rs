@@ -197,6 +197,7 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
     const HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
     const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
     const HTTP_USER_AGENT: &str = "muuuxy/1.0";
+    const HTTP_MAX_REDIRECTS: usize = 1;
 
     // TODO: Check if the file ends with `.m3u8`.
     // TODO: Find better timeout value.
@@ -205,7 +206,7 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
         .connect_timeout(HTTP_CONNECTION_TIMEOUT)
         .timeout(HTTP_TIMEOUT)
         // NOTE: Trys to avoid bait-and-switch.
-        .redirect(Policy::none())
+        .redirect(Policy::limited(HTTP_MAX_REDIRECTS))
         .referer(false)
         .https_only(true)
         .user_agent(HTTP_USER_AGENT);
