@@ -153,7 +153,7 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
 
         match ip {
             IpAddr::V4(v4) => {
-                debug!(ip = v4.to_string(), "IP address resolved");
+                debug!(ip = v4.to_string(), "IPv4 address resolved");
 
                 // NOTE: Trys to avoid Server-Side Request Forgery (SSRF).
                 if v4.is_loopback()
@@ -174,8 +174,21 @@ async fn proxy(params: Query<ProxyParams>, state: Extension<Arc<State>>) -> impl
                         .unwrap();
                 }
             }
-            IpAddr::V6(_) => {
-                todo!();
+            IpAddr::V6(v6) => {
+                debug!(ip = v6.to_string(), "IPv6 address resolved");
+
+                // NOTE: Trys to avoid Server-Side Request Forgery (SSRF).
+                if v6.is_loopback() || v6.is_multicast() || v6.is_unspecified() {
+                    return response_builder
+                        .status(StatusCode::BAD_REQUEST)
+                        .header(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/octet-stream"),
+                        )
+                        .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                        .body(Body::empty())
+                        .unwrap();
+                }
             }
         };
     }
